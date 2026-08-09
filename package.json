@@ -6,7 +6,7 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "@google/genai": "^0.1.1",
+    "@google/genai": "latest",
     "@tavily/core": "^0.0.2",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
