@@ -11,7 +11,7 @@ const serviceAccount = require('./firebase-key.json');
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
-// 2. Initialize Search Client (Google GenAI package removed)
+// 2. Initialize Search Client
 const tvly = tavily({ apiKey: process.env.TAVILY_API_KEY });
 
 // 3. The Core Chat Endpoint
@@ -23,33 +23,36 @@ app.post('/chat', async (req, res) => {
         const searchData = await tvly.search(userMessage);
         const context = searchData.results.map(r => r.content).join('\n');
 
-        // Pass the web context and user message to Gemini
+        // Pass the web context and user message to the AI
         const prompt = `You are Alex, a highly intelligent and concise personal assistant. 
         You must always answer in 2 sentences or less. Do not use robotic jargon.
         Use this live web data to answer the user: ${context}
         
         User asks: ${userMessage}`;
         
-        // 4. FIX: Use raw Fetch instead of the buggy Google GenAI package
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+        // 4. FIX: Use Groq to bypass the Google bug
+        const groqUrl = 'https://api.groq.com/openai/v1/chat/completions';
         
-        const aiRequest = await fetch(geminiUrl, {
+        const aiRequest = await fetch(groqUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.GROQ_API_KEY}` 
+            },
             body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }]
+                model: 'llama-3.1-8b-instant', 
+                messages: [{ role: 'user', content: prompt }]
             })
         });
         
         const aiData = await aiRequest.json();
         
-        // Catch any raw Google API errors
         if (aiData.error) {
-            console.error("Google API Error:", aiData.error);
-            return res.status(500).json({ error: 'Google API failed' });
+            console.error("AI API Error:", aiData.error);
+            return res.status(500).json({ error: 'AI failed' });
         }
 
-        const aiResponse = aiData.candidates[0].content.parts[0].text;
+        const aiResponse = aiData.choices[0].message.content;
 
         // Save to Firebase Database
         await db.collection('conversations').add({
