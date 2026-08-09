@@ -1,7 +1,6 @@
 require('dotenv').config();
 const express = require('express');
 const admin = require('firebase-admin');
-const { GoogleGenAI } = require('@google/genai');
 const { tavily } = require('@tavily/core');
 
 const app = express();
@@ -12,8 +11,7 @@ const serviceAccount = require('./firebase-key.json');
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
-// 2. Initialize AI & Search Clients
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// 2. Initialize Search Client (Google GenAI package removed)
 const tvly = tavily({ apiKey: process.env.TAVILY_API_KEY });
 
 // 3. The Core Chat Endpoint
@@ -32,11 +30,26 @@ app.post('/chat', async (req, res) => {
         
         User asks: ${userMessage}`;
         
-        const aiResult = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: prompt
+        // 4. FIX: Use raw Fetch instead of the buggy Google GenAI package
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+        
+        const aiRequest = await fetch(geminiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }]
+            })
         });
-        const aiResponse = aiResult.text;
+        
+        const aiData = await aiRequest.json();
+        
+        // Catch any raw Google API errors
+        if (aiData.error) {
+            console.error("Google API Error:", aiData.error);
+            return res.status(500).json({ error: 'Google API failed' });
+        }
+
+        const aiResponse = aiData.candidates[0].content.parts[0].text;
 
         // Save to Firebase Database
         await db.collection('conversations').add({
@@ -54,6 +67,6 @@ app.post('/chat', async (req, res) => {
     }
 });
 
-// Render dynamically assigns a port, so we use process.env.PORT
+// Render dynamically assigns a port
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Alex Server running on port ${port}`));
