@@ -31,7 +31,7 @@ app.post('/chat', async (req, res) => {
         User asks: ${userMessage}`;
         
         // 4. FIX: Use raw Fetch instead of the buggy Google GenAI package
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
         
         const aiRequest = await fetch(geminiUrl, {
             method: 'POST',
