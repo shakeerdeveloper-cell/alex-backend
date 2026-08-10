@@ -1,10 +1,10 @@
 require('dotenv').config();
 const express = require('express');
 const admin = require('firebase-admin');
-const { tavily } = require('@tavily/core');
 
 const app = express();
 app.use(express.json());
+
 // Bypass CORS security blocks
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
@@ -15,31 +15,44 @@ app.use((req, res, next) => {
     }
     next();
 });
+
 // 1. Initialize Firebase Database
 const serviceAccount = require('./firebase-key.json');
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
-// 2. Initialize Search Client
-const tvly = tavily({ apiKey: process.env.TAVILY_API_KEY });
-
-// 3. The Core Chat Endpoint
+// 2. The Core Chat Endpoint (Now with Memory)
 app.post('/chat', async (req, res) => {
     try {
         const userMessage = req.body.message;
 
-        // Search the web in the background using Tavily
-        const searchData = await tvly.search(userMessage);
-        const context = searchData.results.map(r => r.content).join('\n');
+        // --- STEP A: Fetch Memory from Firebase ---
+        // Grab the last 5 conversations from the database to use as context
+        const historySnapshot = await db.collection('conversations')
+            .orderBy('timestamp', 'desc')
+            .limit(5)
+            .get();
 
-        // Pass the web context and user message to the AI
-        const prompt = `You are Alex, a highly intelligent and concise personal assistant. 
-        You must always answer in 2 sentences or less. Do not use robotic jargon.
-        Use this live web data to answer the user: ${context}
+        let pastMessages = [];
+        historySnapshot.forEach(doc => {
+            const data = doc.data();
+            // Because we pulled them newest-first, we push them to the front of the array
+            // so they read in correct chronological order for the AI
+            pastMessages.unshift({ role: 'assistant', content: data.ai });
+            pastMessages.unshift({ role: 'user', content: data.user });
+        });
+
+        // --- STEP B: Build the AI's Brain Context ---
+        const messagesArray = [
+            { 
+                role: 'system', 
+                content: 'You are Alex, a highly intelligent and concise personal assistant. You must always answer in 2 sentences or less. Do not use robotic jargon. Remember the context of the prior conversation.' 
+            },
+            ...pastMessages, // Inject the past memory here
+            { role: 'user', content: userMessage } // Add the brand new question here
+        ];
         
-        User asks: ${userMessage}`;
-        
-        // 4. FIX: Use Groq to bypass the Google bug
+        // --- STEP C: Call Groq ---
         const groqUrl = 'https://api.groq.com/openai/v1/chat/completions';
         
         const aiRequest = await fetch(groqUrl, {
@@ -50,7 +63,7 @@ app.post('/chat', async (req, res) => {
             },
             body: JSON.stringify({
                 model: 'llama-3.1-8b-instant', 
-                messages: [{ role: 'user', content: prompt }]
+                messages: messagesArray // Send the full history array, not just the prompt
             })
         });
         
@@ -63,14 +76,14 @@ app.post('/chat', async (req, res) => {
 
         const aiResponse = aiData.choices[0].message.content;
 
-        // Save to Firebase Database
+        // --- STEP D: Save the new memory to Firebase ---
         await db.collection('conversations').add({
             user: userMessage,
             ai: aiResponse,
             timestamp: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        // Send text back to the mobile app
+        // Send text back to the mobile app/website
         res.json({ reply: aiResponse });
 
     } catch (error) {
@@ -79,6 +92,5 @@ app.post('/chat', async (req, res) => {
     }
 });
 
-// Render dynamically assigns a port
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Alex Server running on port ${port}`));
