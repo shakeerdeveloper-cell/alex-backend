@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const admin = require('firebase-admin');
+const { tavily } = require('@tavily/core');
 
 const app = express();
 app.use(express.json());
@@ -16,74 +17,136 @@ app.use((req, res, next) => {
     next();
 });
 
-// 1. Initialize Firebase Database
+// 1. Initialize Firebase & Web Search
 const serviceAccount = require('./firebase-key.json');
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
+const tvly = tavily({ apiKey: process.env.TAVILY_API_KEY });
 
-// 2. The Core Chat Endpoint (Now with Memory)
+// 2. The Core Chat Endpoint (Function Calling / Tool Use)
 app.post('/chat', async (req, res) => {
     try {
         const userMessage = req.body.message;
 
-        // --- STEP A: Fetch Memory from Firebase ---
-        // Grab the last 5 conversations from the database to use as context
+        // --- STEP A: Fetch Memory ---
         const historySnapshot = await db.collection('conversations')
             .orderBy('timestamp', 'desc')
-            .limit(5)
+            .limit(10) 
             .get();
 
         let pastMessages = [];
         historySnapshot.forEach(doc => {
             const data = doc.data();
-            // Because we pulled them newest-first, we push them to the front of the array
-            // so they read in correct chronological order for the AI
             pastMessages.unshift({ role: 'assistant', content: data.ai });
             pastMessages.unshift({ role: 'user', content: data.user });
         });
 
-        // --- STEP B: Build the AI's Brain Context ---
-        const messagesArray = [
-            { 
-                role: 'system', 
-                content: 'You are Alex, a highly intelligent and concise personal assistant. You must always answer in 2 sentences or less. Do not use robotic jargon. Remember the context of the prior conversation.' 
-            },
-            ...pastMessages, // Inject the past memory here
-            { role: 'user', content: userMessage } // Add the brand new question here
+        // --- STEP B: The Human Personality Prompt ---
+        const systemPrompt = `You are Alex, a highly natural, conversational, and friendly human-like AI assistant. 
+        Speak casually, using natural conversational phrasing with high empathy. Do not sound robotic. 
+        You act as a creative partner, always ready to brainstorm ideas for projects like 9:16 portrait animations, educational alphabet designs, or structured outfit modeling sequences.
+        Keep responses to 1 to 3 short, spoken sentences. 
+        CRITICAL RULE: If the user asks for facts, news, weather, or specific information you do not know, YOU MUST USE THE 'search_web' TOOL. If they are just chatting or sharing feelings, DO NOT use the tool.`;
+
+        let messagesArray = [
+            { role: 'system', content: systemPrompt },
+            ...pastMessages,
+            { role: 'user', content: userMessage }
+        ];
+
+        // --- STEP C: Define the Browser Tool for the AI ---
+        const tools = [
+            {
+                type: "function",
+                function: {
+                    name: "search_web",
+                    description: "Search the live internet for factual answers, news, weather, or current events.",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            query: {
+                                type: "string",
+                                description: "The exact search query to look up on the internet."
+                            }
+                        },
+                        required: ["query"]
+                    }
+                }
+            }
         ];
         
-        // --- STEP C: Call Groq ---
         const groqUrl = 'https://api.groq.com/openai/v1/chat/completions';
         
-        const aiRequest = await fetch(groqUrl, {
+        // --- STEP D: First AI Request (Let Alex decide what to do) ---
+        let aiRequest = await fetch(groqUrl, {
             method: 'POST',
-            headers: { 
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.GROQ_API_KEY}` 
-            },
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
             body: JSON.stringify({
                 model: 'llama-3.1-8b-instant', 
-                messages: messagesArray // Send the full history array, not just the prompt
+                messages: messagesArray,
+                tools: tools,
+                tool_choice: "auto" // This allows the AI to choose whether to search or not
             })
         });
         
-        const aiData = await aiRequest.json();
-        
-        if (aiData.error) {
-            console.error("AI API Error:", aiData.error);
-            return res.status(500).json({ error: 'AI failed' });
+        let aiData = await aiRequest.json();
+        if (aiData.error) throw new Error(aiData.error.message);
+
+        let responseMessage = aiData.choices[0].message;
+        let aiResponse = "";
+
+        // --- STEP E: Check if Alex decided to use the Browser Tool ---
+        if (responseMessage.tool_calls) {
+            console.log("ALEX DECIDED TO SEARCH THE WEB!");
+            
+            // Log Alex's request into the memory chain
+            messagesArray.push(responseMessage);
+
+            for (const toolCall of responseMessage.tool_calls) {
+                if (toolCall.function.name === "search_web") {
+                    const args = JSON.parse(toolCall.function.arguments);
+                    console.log("Searching for:", args.query);
+                    
+                    // Actually search the internet
+                    const searchData = await tvly.search(args.query);
+                    const webContext = searchData.results.map(r => r.content).join('\n');
+
+                    // Give the internet results back to Alex
+                    messagesArray.push({
+                        role: "tool",
+                        tool_call_id: toolCall.id,
+                        name: toolCall.function.name,
+                        content: webContext
+                    });
+                }
+            }
+
+            // --- STEP F: Second AI Request (Alex reads results and speaks) ---
+            let secondAiRequest = await fetch(groqUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
+                body: JSON.stringify({
+                    model: 'llama-3.1-8b-instant', 
+                    messages: messagesArray
+                })
+            });
+            
+            let secondAiData = await secondAiRequest.json();
+            aiResponse = secondAiData.choices[0].message.content;
+
+        } else {
+            // --- STEP G: Alex decided to just have a human conversation ---
+            console.log("ALEX DECIDED TO JUST CHAT NATURALLY.");
+            aiResponse = responseMessage.content;
         }
 
-        const aiResponse = aiData.choices[0].message.content;
-
-        // --- STEP D: Save the new memory to Firebase ---
+        // --- STEP H: Save to Database ---
         await db.collection('conversations').add({
             user: userMessage,
             ai: aiResponse,
             timestamp: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        // Send text back to the mobile app/website
         res.json({ reply: aiResponse });
 
     } catch (error) {
