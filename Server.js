@@ -65,7 +65,8 @@ app.post('/chat', async (req, res) => {
             }
         }
 
-        const systemPrompt = "You are Alex, an intelligent, helpful, and friendly AI assistant. If the user asks for real-time information, current events, recent news, sports scores, weather, or facts beyond your training data, YOU MUST use the 'search_web' tool to find the live answer. Keep responses conversational and concise.";
+        // Gentler prompt prevents Groq's "Failed to call function" syntax error
+        const systemPrompt = "You are Alex, an intelligent, helpful, and friendly AI assistant. You have access to a web search tool. Use it when the user asks for real-time information, current events, weather, or facts beyond your knowledge. Keep responses conversational and concise.";
 
         let messagesArray = [
             { role: 'system', content: systemPrompt },
@@ -78,13 +79,13 @@ app.post('/chat', async (req, res) => {
             type: "function",
             function: {
                 name: "search_web",
-                description: "Search the live internet for real-time news, sports, weather, and current events.",
+                description: "Search the internet for real-time news, sports, weather, and current events.",
                 parameters: {
                     type: "object",
                     properties: { 
                         query: { 
                             type: "string", 
-                            description: "The Google search query." 
+                            description: "The search query to look up on Google." 
                         } 
                     },
                     required: ["query"]
@@ -93,9 +94,9 @@ app.post('/chat', async (req, res) => {
         }];
 
         const groqUrl = 'https://api.groq.com/openai/v1/chat/completions';
-        const groqModel = 'llama-3.3-70b-versatile'; // Upgraded to a much smarter, larger model
+        const groqModel = 'llama-3.3-70b-versatile'; 
 
-        // Step 1: Ask AI if it needs to search the web
+        // Step 1: Ask AI if it needs to search the web (Temperature 0.2 added for strict JSON reliability)
         let aiRequest = await fetch(groqUrl, {
             method: 'POST',
             headers: {
@@ -106,7 +107,8 @@ app.post('/chat', async (req, res) => {
                 model: groqModel,
                 messages: messagesArray,
                 tools: tools,
-                tool_choice: "auto"
+                tool_choice: "auto",
+                temperature: 0.2 
             })
         });
 
@@ -119,7 +121,7 @@ app.post('/chat', async (req, res) => {
         // Step 2: Handle Internet Search if the AI decided to browse
         if (responseMessage.tool_calls) {
             console.log("ALEX IS SEARCHING THE LIVE WEB!");
-            messagesArray.push(responseMessage); // Add AI's decision to memory
+            messagesArray.push(responseMessage); 
             
             for (const toolCall of responseMessage.tool_calls) {
                 if (toolCall.function.name === "search_web") {
@@ -133,7 +135,7 @@ app.post('/chat', async (req, res) => {
                             role: "tool", 
                             tool_call_id: toolCall.id, 
                             name: toolCall.function.name, 
-                            content: webContext 
+                            content: webContext || "No results found."
                         });
                     } catch (searchErr) {
                         messagesArray.push({ 
@@ -146,7 +148,7 @@ app.post('/chat', async (req, res) => {
                 }
             }
 
-            // Step 3: Second AI call to read the internet results and give you the answer
+            // Step 3: Second AI call (also at temp 0.2) to summarize results
             let secondAiRequest = await fetch(groqUrl, {
                 method: 'POST',
                 headers: {
@@ -155,15 +157,22 @@ app.post('/chat', async (req, res) => {
                 },
                 body: JSON.stringify({
                     model: groqModel,
-                    messages: messagesArray
+                    messages: messagesArray,
+                    temperature: 0.2 
                 })
             });
             
             let secondAiData = await secondAiRequest.json();
+            
+            // Check for error in second request just in case
+            if (secondAiData.error) {
+                 return res.json({ reply: `Groq Error (Finalizing): ${secondAiData.error.message}` });
+            }
+
             aiReply = secondAiData.choices[0].message.content;
 
         } else {
-            // AI decided it didn't need the internet (e.g., natural conversation)
+            // AI decided it didn't need the internet
             aiReply = responseMessage.content;
         }
 
